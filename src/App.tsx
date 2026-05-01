@@ -17,12 +17,15 @@ import {
   X,
   Loader2,
   ShieldAlert,
-  Activity
+  Activity,
+  Download,
+  FileText
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { analyzeInfectionImage, AnalysisResult } from './services/geminiService';
 import { cn } from './utils/cn';
 import Markdown from 'react-markdown';
+import { jsPDF } from 'jspdf';
 
 interface ScanHistoryItem extends AnalysisResult {
   id: string;
@@ -37,22 +40,55 @@ export default function App() {
   const [history, setHistory] = useState<ScanHistoryItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
+  const [isDragging, setIsDragging] = useState(false);
   
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement> | React.DragEvent) => {
+    let file: File | undefined;
+    
+    if ('files' in e.target && e.target.files) {
+      file = e.target.files[0];
+    } else if ('dataTransfer' in e && e.dataTransfer.files) {
+      file = e.dataTransfer.files[0];
+    }
+
     if (file) {
+      if (!file.type.startsWith('image/')) {
+        setError("Пожалуйста, загрузите изображение.");
+        return;
+      }
+      if (file.size > 10 * 1024 * 1024) {
+        setError("Размер файла не должен превышать 10MB.");
+        return;
+      }
+
       const reader = new FileReader();
       reader.onloadend = () => {
         setImage(reader.result as string);
         setResult(null);
         setError(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
       };
       reader.readAsDataURL(file);
     }
+    setIsDragging(false);
+  };
+
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const onDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    handleImageUpload(e);
   };
 
   const startCamera = async () => {
@@ -135,6 +171,48 @@ export default function App() {
     }
   };
 
+  const exportToTXT = () => {
+    if (!result) return;
+    
+    const content = `
+ОТЧЕТ ОБ АНАЛИЗЕ ИНФЕКЦИИ (InfectoScan AI)
+Дата: ${new Date().toLocaleString('ru-RU')}
+-------------------------------------------
+ДИАГНОЗ: ${result.diagnosis}
+УРОВЕНЬ СРОЧНОСТИ: ${translateUrgency(result.urgency)}
+
+КЛИНИЧЕСКОЕ ОБОСНОВАНИЕ:
+${result.reasoning}
+
+ДИФФЕРЕНЦИАЛЬНЫЙ ДИАГНОЗ:
+${result.differentialDiagnosis.map(d => `- ${d}`).join('\n')}
+
+РЕКОМЕНДАЦИИ:
+${result.recommendations.map(r => `- ${r}`).join('\n')}
+
+-------------------------------------------
+ОТКАЗ ОТ ОТВЕТСТВЕННОСТИ:
+Данная система является вспомогательным инструментом на базе ИИ. 
+Результаты не являются окончательным диагнозом. 
+Окончательное клиническое решение принимает врач-инфекционист.
+`.trim();
+
+    const blob = new Blob([content], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `InfectoScan_Report_${new Date().getTime()}.txt`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const exportToPDF = () => {
+    // Note: jsPDF standard fonts don't support Cyrillic well without custom fonts.
+    // We'll use a simple TXT export as primary, but we can also trigger a print view
+    // which allows the user to "Save as PDF" with full styling and Cyrillic support.
+    window.print();
+  };
+
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans selection:bg-indigo-100">
       {/* Header */}
@@ -194,14 +272,29 @@ export default function App() {
                 <div className="space-y-4">
                   <div 
                     onClick={() => fileInputRef.current?.click()}
-                    className="group cursor-pointer border-2 border-dashed border-slate-200 hover:border-indigo-400 hover:bg-indigo-50/30 rounded-xl p-10 transition-all duration-200 flex flex-col items-center justify-center gap-4"
+                    onDragOver={onDragOver}
+                    onDragLeave={onDragLeave}
+                    onDrop={onDrop}
+                    className={cn(
+                      "group cursor-pointer border-2 border-dashed rounded-xl p-10 transition-all duration-200 flex flex-col items-center justify-center gap-4",
+                      isDragging 
+                        ? "border-indigo-500 bg-indigo-50/50 scale-[1.02]" 
+                        : "border-slate-200 hover:border-indigo-400 hover:bg-indigo-50/30"
+                    )}
                   >
-                    <div className="w-14 h-14 bg-slate-50 group-hover:bg-white rounded-full flex items-center justify-center shadow-sm border border-slate-100 transition-colors">
-                      <Upload className="w-6 h-6 text-slate-400 group-hover:text-indigo-500" />
+                    <div className={cn(
+                      "w-14 h-14 rounded-full flex items-center justify-center shadow-sm border transition-colors",
+                      isDragging ? "bg-white border-indigo-200" : "bg-slate-50 group-hover:bg-white border-slate-100"
+                    )}>
+                      <Upload className={cn(
+                        "w-6 h-6 transition-colors",
+                        isDragging ? "text-indigo-600" : "text-slate-400 group-hover:text-indigo-500"
+                      )} />
                     </div>
                     <div className="text-center">
-                      <p className="text-sm font-semibold text-slate-700">Загрузить фото</p>
-                      <p className="text-xs text-slate-400 mt-1">PNG, JPG до 10MB</p>
+                      <p className="text-sm font-semibold text-slate-700">Перетащите фото сюда</p>
+                      <p className="text-xs text-slate-400 mt-1">или нажмите для выбора из памяти</p>
+                      <p className="text-[10px] text-slate-300 mt-2 uppercase tracking-tighter">PNG, JPG до 10MB</p>
                     </div>
                     <input 
                       type="file" 
@@ -212,18 +305,22 @@ export default function App() {
                     />
                   </div>
                   
-                  <div className="relative">
-                    <div className="absolute inset-0 flex items-center"><span className="w-full border-t border-slate-100"></span></div>
-                    <div className="relative flex justify-center text-xs uppercase"><span className="bg-white px-2 text-slate-400 font-medium">или</span></div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <button 
+                      onClick={() => fileInputRef.current?.click()}
+                      className="py-3 px-4 bg-white border border-slate-200 hover:border-indigo-200 hover:bg-indigo-50/30 text-slate-700 rounded-xl font-semibold flex items-center justify-center gap-2 transition-all shadow-sm"
+                    >
+                      <Upload className="w-4 h-4 text-indigo-500" />
+                      Из памяти
+                    </button>
+                    <button 
+                      onClick={startCamera}
+                      className="py-3 px-4 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-semibold flex items-center justify-center gap-2 transition-all shadow-md"
+                    >
+                      <Camera className="w-4 h-4" />
+                      Камера
+                    </button>
                   </div>
-
-                  <button 
-                    onClick={startCamera}
-                    className="w-full py-3 px-4 bg-slate-900 hover:bg-slate-800 text-white rounded-xl font-semibold flex items-center justify-center gap-2 transition-all shadow-md"
-                  >
-                    <Camera className="w-4 h-4" />
-                    Использовать камеру
-                  </button>
                 </div>
               ) : isCameraOpen ? (
                 <div className="space-y-4">
@@ -327,7 +424,27 @@ export default function App() {
                       <AlertCircle className="w-5 h-5" />
                       <span className="text-xs font-bold uppercase tracking-widest">Уровень срочности: {translateUrgency(result.urgency)}</span>
                     </div>
-                    <span className="text-[10px] font-mono opacity-70 uppercase tracking-tighter">ID: {Math.random().toString(36).substr(2, 6)}</span>
+                    <div className="flex items-center gap-3">
+                      <div className="flex items-center gap-1">
+                        <button 
+                          onClick={exportToTXT}
+                          className="p-1.5 hover:bg-black/5 rounded-md transition-colors flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider"
+                          title="Экспорт в TXT"
+                        >
+                          <FileText className="w-3.5 h-3.5" />
+                          TXT
+                        </button>
+                        <button 
+                          onClick={exportToPDF}
+                          className="p-1.5 hover:bg-black/5 rounded-md transition-colors flex items-center gap-1.5 text-[10px] font-bold uppercase tracking-wider"
+                          title="Печать / PDF"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          PDF
+                        </button>
+                      </div>
+                      <span className="text-[10px] font-mono opacity-70 uppercase tracking-tighter">ID: {Math.random().toString(36).substr(2, 6)}</span>
+                    </div>
                   </div>
                   
                   <div className="p-8">
