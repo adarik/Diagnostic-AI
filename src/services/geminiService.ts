@@ -31,12 +31,27 @@ const SYSTEM_INSTRUCTION = `Вы — высококвалифицированн�
 
 Если изображение не относится к медицинской инфекции или имеет слишком низкое качество, четко укажите это в поле диагноза и попросите предоставить более качественное изображение. Все текстовые поля должны быть на русском языке.`;
 
+function parseAnalysisResult(text: string): AnalysisResult {
+  // Strip markdown code blocks if the model wraps JSON in them
+  const cleaned = text.replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+  const parsed = JSON.parse(cleaned);
+
+  if (!parsed.diagnosis || !Array.isArray(parsed.differentialDiagnosis) || !parsed.reasoning || !Array.isArray(parsed.recommendations) || !parsed.urgency) {
+    throw new Error("Неверный формат ответа от ИИ");
+  }
+  const validUrgencies = ['low', 'medium', 'high', 'critical'];
+  if (!validUrgencies.includes(parsed.urgency)) {
+    parsed.urgency = 'medium';
+  }
+  return parsed as AnalysisResult;
+}
+
 export async function analyzeInfectionImage(base64Image: string, mimeType: string): Promise<AnalysisResult> {
-  const model = "gemini-3.1-pro-preview";
-  
+  const model = "gemini-2.5-pro";
+
   const imagePart = {
     inlineData: {
-      data: base64Image.split(',')[1], // Remove the data:image/jpeg;base64, prefix
+      data: base64Image.includes(',') ? base64Image.split(',')[1] : base64Image,
       mimeType: mimeType,
     },
   };
@@ -45,22 +60,27 @@ export async function analyzeInfectionImage(base64Image: string, mimeType: strin
     text: "Проанализируйте это клиническое изображение на наличие потенциальных инфекционных заболеваний. Предоставьте свою оценку в указанном формате JSON на русском языке.",
   };
 
-  try {
-    const response = await ai.models.generateContent({
-      model: model,
-      contents: [{ parts: [imagePart, textPart] }],
-      config: {
-        systemInstruction: SYSTEM_INSTRUCTION,
-        responseMimeType: "application/json",
-      },
-    });
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: model,
+        contents: [{ parts: [imagePart, textPart] }],
+        config: {
+          systemInstruction: SYSTEM_INSTRUCTION,
+          responseMimeType: "application/json",
+        },
+      });
 
-    const text = response.text;
-    if (!text) throw new Error("No response from AI");
-    
-    return JSON.parse(text) as AnalysisResult;
-  } catch (error) {
-    console.error("Error analyzing image:", error);
-    throw error;
+      const text = response.text;
+      if (!text) throw new Error("Пустой ответ от ИИ");
+
+      return parseAnalysisResult(text);
+    } catch (error) {
+      lastError = error;
+      if (attempt < 2) await new Promise(r => setTimeout(r, 1000 * (attempt + 1)));
+    }
   }
+  console.error("Error analyzing image:", lastError);
+  throw lastError;
 }

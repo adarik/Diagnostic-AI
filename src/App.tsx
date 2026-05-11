@@ -3,29 +3,34 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useCallback } from 'react';
-import { 
-  Camera, 
-  Upload, 
-  AlertCircle, 
-  CheckCircle2, 
-  Clock, 
-  ChevronRight, 
-  Stethoscope, 
-  History, 
+import React, { useState, useRef, useCallback, useEffect } from 'react';
+import {
+  Camera,
+  Upload,
+  AlertCircle,
+  CheckCircle2,
+  Clock,
+  ChevronRight,
+  Stethoscope,
+  History,
   Info,
   X,
   Loader2,
   ShieldAlert,
   Activity,
   Download,
-  FileText
+  FileText,
+  Cpu,
+  Cloud,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { analyzeInfectionImage, AnalysisResult } from './services/geminiService';
+import { analyzeWithOllama, checkOllamaAvailable, getOllamaModels, OLLAMA_MODELS } from './services/ollamaService';
 import { cn } from './utils/cn';
 import Markdown from 'react-markdown';
 import { jsPDF } from 'jspdf';
+
+type Provider = 'gemini' | 'ollama';
 
 interface ScanHistoryItem extends AnalysisResult {
   id: string;
@@ -41,10 +46,24 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  
+
+  const [provider, setProvider] = useState<Provider>('gemini');
+  const [ollamaModel, setOllamaModel] = useState(OLLAMA_MODELS[0].id);
+  const [ollamaAvailable, setOllamaAvailable] = useState<boolean | null>(null);
+  const [installedModels, setInstalledModels] = useState<string[]>([]);
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
+
+  useEffect(() => {
+    checkOllamaAvailable().then(available => {
+      setOllamaAvailable(available);
+      if (available) {
+        getOllamaModels().then(setInstalledModels);
+      }
+    });
+  }, []);
 
   const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement> | React.DragEvent) => {
     let file: File | undefined;
@@ -129,22 +148,28 @@ export default function App() {
 
   const runAnalysis = async () => {
     if (!image) return;
-    
+
     setIsAnalyzing(true);
     setError(null);
     try {
-      const analysis = await analyzeInfectionImage(image, 'image/jpeg');
+      let analysis: AnalysisResult;
+      if (provider === 'ollama') {
+        analysis = await analyzeWithOllama(image, ollamaModel);
+      } else {
+        analysis = await analyzeInfectionImage(image, 'image/jpeg');
+      }
       setResult(analysis);
-      
+
       const historyItem: ScanHistoryItem = {
         ...analysis,
         id: Math.random().toString(36).substr(2, 9),
         timestamp: Date.now(),
-        image: image
+        image: image,
       };
       setHistory(prev => [historyItem, ...prev]);
-    } catch (err) {
-      setError("Ошибка при анализе изображения. Пожалуйста, попробуйте еще раз.");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(`Ошибка при анализе изображения: ${msg}`);
       console.error(err);
     } finally {
       setIsAnalyzing(false);
@@ -229,7 +254,45 @@ ${result.recommendations.map(r => `- ${r}`).join('\n')}
           </div>
           
           <div className="flex items-center gap-2">
-            <button 
+            {/* Provider toggle */}
+            <div className="flex items-center bg-slate-100 rounded-xl p-1 gap-1">
+              <button
+                onClick={() => setProvider('gemini')}
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all",
+                  provider === 'gemini'
+                    ? "bg-white text-indigo-700 shadow-sm"
+                    : "text-slate-500 hover:text-slate-700"
+                )}
+                title="Google Gemini (облако)"
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                Gemini
+              </button>
+              <button
+                onClick={() => setProvider('ollama')}
+                className={cn(
+                  "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-all",
+                  provider === 'ollama'
+                    ? "bg-white text-emerald-700 shadow-sm"
+                    : "text-slate-500 hover:text-slate-700"
+                )}
+                title="Ollama (локально, бесплатно)"
+              >
+                <Cpu className="w-3.5 h-3.5" />
+                Ollama
+                {ollamaAvailable === true && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 inline-block"></span>
+                )}
+                {ollamaAvailable === false && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-red-400 inline-block"></span>
+                )}
+              </button>
+            </div>
+
+            <div className="h-6 w-[1px] bg-slate-200 mx-1"></div>
+
+            <button
               onClick={() => setShowHistory(!showHistory)}
               className="p-2 hover:bg-slate-100 rounded-lg transition-colors relative"
               title="История"
@@ -239,7 +302,7 @@ ${result.recommendations.map(r => `- ${r}`).join('\n')}
                 <span className="absolute top-1 right-1 w-2 h-2 bg-indigo-500 rounded-full border-2 border-white"></span>
               )}
             </button>
-            <div className="h-6 w-[1px] bg-slate-200 mx-2"></div>
+            <div className="h-6 w-[1px] bg-slate-200 mx-1"></div>
             <div className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 text-emerald-700 rounded-full border border-emerald-100">
               <div className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></div>
               <span className="text-xs font-semibold">Система активна</span>
@@ -251,6 +314,52 @@ ${result.recommendations.map(r => `- ${r}`).join('\n')}
       <main className="max-w-5xl mx-auto px-6 py-8 grid grid-cols-1 lg:grid-cols-12 gap-8">
         {/* Left Column: Input & Preview */}
         <div className="lg:col-span-5 space-y-6">
+          {/* Ollama settings panel */}
+          {provider === 'ollama' && (
+            <div className={cn(
+              "rounded-xl p-4 border text-sm",
+              ollamaAvailable === false
+                ? "bg-red-50 border-red-100 text-red-800"
+                : "bg-emerald-50 border-emerald-100 text-emerald-800"
+            )}>
+              <div className="flex items-center gap-2 font-bold mb-2">
+                <Cpu className="w-4 h-4" />
+                {ollamaAvailable === false
+                  ? "Ollama не найден"
+                  : "Локальная модель Ollama"}
+              </div>
+              {ollamaAvailable === false ? (
+                <p className="text-xs leading-relaxed">
+                  Запустите Ollama на вашем компьютере:{' '}
+                  <code className="bg-red-100 px-1 rounded font-mono">ollama serve</code>
+                  {' '}и установите модель:{' '}
+                  <code className="bg-red-100 px-1 rounded font-mono">ollama pull llava:13b</code>
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  <p className="text-xs text-emerald-700">Ollama запущен. Выберите модель:</p>
+                  <select
+                    value={ollamaModel}
+                    onChange={e => setOllamaModel(e.target.value)}
+                    className="w-full text-xs border border-emerald-200 bg-white rounded-lg px-3 py-2 text-slate-700 focus:outline-none focus:ring-2 focus:ring-emerald-300"
+                  >
+                    {OLLAMA_MODELS.map(m => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}{installedModels.includes(m.id) ? ' ✓' : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {!installedModels.includes(ollamaModel) && (
+                    <p className="text-[11px] text-amber-700 bg-amber-50 border border-amber-100 rounded-lg px-3 py-2">
+                      Модель не установлена. Установите:{' '}
+                      <code className="font-mono">ollama pull {ollamaModel}</code>
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
           <section className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
             <div className="p-5 border-b border-slate-100 flex items-center justify-between">
               <h2 className="font-semibold flex items-center gap-2">
